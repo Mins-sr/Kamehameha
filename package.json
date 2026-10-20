@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node tests.mjs",
-    "verify": "npm run build && npm test"
+    "verify": "npm run build && npm test",
+    "dev": "node scripts/preview.mjs"
   }
 }
-

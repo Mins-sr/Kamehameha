@@ -11,10 +11,10 @@ iPhone などのブラウザーで遊ぶカメラゲームです。最大4人を
 ```sh
 npm run build
 npm test
-python3 -m http.server 8000 --directory dist
+npm run dev
 ```
 
-ブラウザーで `http://localhost:8000` を開きます。`npm run build` は `src/` から `dist/` を作り、MediaPipe・Three.js・モデルを固定URLから取得して SHA-256 とサイズを検証します。ライセンス表示も `dist/vendor/` に含めます。
+ブラウザーで `http://localhost:4173` を開きます。`npm run build` は `src/` から `dist/` を作り、MediaPipe・Three.js・モデルを固定URLから取得して SHA-256 とサイズを検証します。ライセンス表示も `dist/vendor/` に含めます。
 
 ## 公開
 
@@ -23,3 +23,7 @@ python3 -m http.server 8000 --directory dist
 ## 確認
 
 `npm test` はポーズ判定、チャージと発射、方向、誤発射防止、4人追跡、色の維持、気の散乱・回収・消滅、演出パラメーター、4人デモを合成データで確認します。実機カメラの認識、スピーカーからの音、ブラウザー上の描画は別途確認が必要です。
+
+## デザイン
+
+深紺を背景に青い気の光球を置き、開始ボタン・元気玉の見出し・日付には黄色（`#ffd45a`）を使います。トップ画面下の「更新履歴」を開くと最新10件を表示します。光球の緩やかな動きは「視差効果を減らす」設定に合わせて停止します。

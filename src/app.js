@@ -10,7 +10,7 @@ function resize(){W=app.clientWidth;H=app.clientHeight;fx.resize(W,H)}new Resize
 function audioStart(){sound.unlock().then(ok=>{if(!ok)message('♪ をタップして音を再試行')})}
 function stopCamera(){stream?.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null}
 function clearGame(){current=[];lastResult=0;people.reset();fx.reset();sound.stopLoop();$('viewport').style.transform='';$('chargeLine').firstElementChild.style.width='0%'}
-function home(){session++;stopCamera();sound.pause();clearGame();mode='intro';app.className='';$('intro').hidden=false;$('loading').hidden=true;$('hud').hidden=true;$('demoTag').hidden=true;$('message').hidden=true;$('flip').disabled=false;lastVideo=-1}
+function home(){session++;stopCamera();sound.pause();clearGame();mode='intro';app.className='';$('intro').hidden=false;$('intro').scrollTop=0;$('loading').hidden=true;$('hud').hidden=true;$('demoTag').hidden=true;$('message').hidden=true;$('flip').disabled=false;lastVideo=-1}
 function play(next){clearGame();mode=next;app.className=next;$('intro').hidden=true;$('loading').hidden=true;$('hud').hidden=false;$('demoTag').hidden=next!=='demo';$('flip').disabled=next==='demo';$('message').hidden=true;demoAt=performance.now();lastVideo=-1;lastPredict=0;frameErrors=0}
 async function openCamera(token){
  if(!navigator.mediaDevices?.getUserMedia)throw new Error('ブラウザで開いてください');
@@ -76,7 +76,7 @@ function tick(now){requestAnimationFrame(tick);const dt=Math.min(60,now-lastTime
   people.advanceEnergy(now);
   const actors=current.map(t=>{const b=t.smooth,c=map(b),top=map({x:b.x,y:b.top}),bottom=map({x:b.x,y:b.bottom}),edge=map({x:b.x+b.scale,y:b.y}),energyLevel=t.game.phase==='charging'?t.game.charge:t.game.reserve,chargeFeature=t.feature?.chargePoint??t.feature?.hand??(energyLevel?{x:b.x,y:b.y}:null);return {id:t.id,hue:COLORS[t.slot].hue,body:{x:c.x,y:c.y,top:top.y,bottom:bottom.y,width:Math.abs(edge.x-c.x)},point:chargeFeature?map(chargeFeature):null,charge:energyLevel,kind:t.game.phase==='charging'?t.game.mode:t.feature?.mode??t.game.reserveMode??'kame',guide:mode==='demo'?t.points.map(map):null}});
   const energy=people.energy.map(e=>{const p=map(e);return {...e,x:p.x,y:p.y}});
-  fx.draw(now,dt/1000,{actors,energy,intro:mode==='intro'||mode==='loading'});
+  fx.draw(now,dt/1000,{actors,energy,intro:false});
 }
 $('start').onclick=startCamera;$('demo').onclick=startDemo;$('stop').onclick=home;$('cancel').onclick=home;
 $('sound').onclick=()=>{if(sound.status()==='running')sound.mute();else audioStart()};
