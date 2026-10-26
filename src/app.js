@@ -3,7 +3,9 @@ import {People,COLORS} from './people.js';
 import {Sound} from './audio.js';
 import {Effects} from './effects.js';
 const $=id=>document.getElementById(id),app=$('app'),video=$('video'),people=new People(),fx=new Effects($('effects'));
-let mode='intro',facing='user',stream=null,worker=null,detector=null,visionPromise=null,busy=false,session=0,frameErrors=0,lastPredict=0,lastVideo=-1,lastResult=0,current=[],lastTime=performance.now(),demoAt=0,W=innerWidth,H=innerHeight,messageTimer;
+let mode='intro',facing='user',stream=null,worker=null,detector=null,visionPromise=null,busy=false,session=0,frameErrors=0,lastPredict=0,lastVideo=-1,lastResult=0,current=[],lastTime=performance.now(),demoAt=0,W=innerWidth,H=innerHeight,messageTimer,frameSeq=0,lastAppliedFrameSeq=0;
+const metrics={renderFrames:0,inferenceFrames:0,inferenceMs:[],lastInferenceMs:0,lastResultAgeMs:0};
+function recordInference(ms){if(!Number.isFinite(ms))return;metrics.inferenceFrames++;metrics.lastInferenceMs=ms;metrics.inferenceMs.push(ms);if(metrics.inferenceMs.length>120)metrics.inferenceMs.shift();window.__kamehamehaMetrics=metrics}
 const sound=new Sound(state=>{$('sound').dataset.state=state;$('audioMark').textContent=state==='running'?'':state==='muted'?'×':'!';$('sound').setAttribute('aria-label',state==='running'?'音を消す':state==='muted'?'音を有効にして試聴':'音を再試行して試聴');$('sound').setAttribute('aria-pressed',String(state==='running'))});
 function message(text,persistent=false){clearTimeout(messageTimer);$('message').textContent=text;$('message').hidden=false;if(!persistent)messageTimer=setTimeout(()=>$('message').hidden=true,4000)}
 function resize(){W=app.clientWidth;H=app.clientHeight;fx.resize(W,H)}new ResizeObserver(resize).observe(app);resize();
@@ -29,21 +31,40 @@ async function initVision(){
   if(window.Worker&&window.OffscreenCanvas&&window.createImageBitmap){try{
    const w=new Worker(new URL('./vision-worker.js',import.meta.url),{type:'module'});worker=w;
    await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('worker timeout')),25000);w.onerror=e=>{clearTimeout(timer);reject(Error(e.message))};w.onmessage=({data})=>{if(data.type==='ready'){clearTimeout(timer);resolve()}else if(data.type==='error'){clearTimeout(timer);reject(Error(data.message))}};w.postMessage({type:'init'})});
-   w.onmessage=({data})=>{busy=false;if(data.session!==session)return;if(data.type==='result'){frameErrors=0;accept(data.landmarks,data.world,data.time)}else if(data.type==='frame-error'&&++frameErrors>=3)fallback()};w.onerror=()=>fallback();return;
+   w.onmessage=({data})=>{busy=false;if(data.session!==session)return;if(data.type==='result'){frameErrors=0;recordInference(data.inferenceMs);accept(data.landmarks,data.world,data.time,{frameSeq:data.frameSeq,inferenceMs:data.inferenceMs})}else if(data.type==='frame-error'&&++frameErrors>=3)fallback()};w.onerror=()=>fallback();return;
   }catch(e){worker?.terminate();worker=null}}
   await mainDetector();
  })().catch(e=>{visionPromise=null;throw e});return visionPromise;
 }
-async function mainDetector(){const {FilesetResolver,PoseLandmarker}=await import('./vendor/vision_bundle.mjs');const files=await FilesetResolver.forVisionTasks(new URL('./vendor/wasm',import.meta.url).href);const opt={baseOptions:{modelAssetPath:new URL('./vendor/pose.task',import.meta.url).href,delegate:'GPU'},runningMode:'VIDEO',numPoses:4,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.5};try{detector=await PoseLandmarker.createFromOptions(files,opt)}catch{opt.baseOptions.delegate='CPU';detector=await PoseLandmarker.createFromOptions(files,opt)}}
+async function mainDetector(){const {FilesetResolver,PoseLandmarker}=await import('./vendor/vision_bundle.mjs');const files=await FilesetResolver.forVisionTasks(new URL('./vendor/wasm',import.meta.url).href);const opt={baseOptions:{modelAssetPath:new URL('./vendor/pose.task',import.meta.url).href,delegate:'GPU'},runningMode:'VIDEO',numPoses:4,minPoseDetectionConfidence:.35,minPosePresenceConfidence:.35,minTrackingConfidence:.35};try{detector=await PoseLandmarker.createFromOptions(files,opt)}catch{opt.baseOptions.delegate='CPU';detector=await PoseLandmarker.createFromOptions(files,opt)}}
 async function fallback(){if(!worker)return;worker.terminate();worker=null;busy=true;clearGame();try{visionPromise=mainDetector();await visionPromise;frameErrors=0}catch(e){visionPromise=null;if(mode==='camera'){home();message('認識を再開できません。もう一度。',true)}}finally{busy=false}}
 const capture=document.createElement('canvas'),captureCtx=capture.getContext('2d');
 async function detect(now){
- if(mode!=='camera'||busy||document.hidden||video.readyState<2||video.paused||now-lastPredict<85||video.currentTime===lastVideo)return;
- busy=true;lastPredict=now;lastVideo=video.currentTime;const token=session;
- try{if(worker){const s=Math.min(1,512/video.videoWidth);capture.width=Math.round(video.videoWidth*s);capture.height=Math.round(video.videoHeight*s);captureCtx.drawImage(video,0,0,capture.width,capture.height);const bitmap=await createImageBitmap(capture);if(token!==session||!worker){bitmap.close();busy=false;return}worker.postMessage({type:'frame',bitmap,time:now,session:token},[bitmap])}else if(detector){const r=detector.detectForVideo(video,now);if(token===session)accept(r.landmarks,r.worldLandmarks,now);busy=false}else busy=false}
- catch(e){busy=false;if(++frameErrors>=3){if(worker)fallback();else{home();message('認識が停止しました。もう一度。',true)}}}
+ if(mode!=='camera'||busy||document.hidden||video.readyState<2||video.paused||video.currentTime===lastVideo)return;
+ busy=true;lastPredict=now;lastVideo=video.currentTime;const token=session,seq=++frameSeq;
+ try{
+  if(worker){
+   const s=Math.min(1,640/video.videoWidth);
+   capture.width=Math.round(video.videoWidth*s);capture.height=Math.round(video.videoHeight*s);
+   captureCtx.drawImage(video,0,0,capture.width,capture.height);
+   const bitmap=await createImageBitmap(capture);
+   if(token!==session||!worker){bitmap.close();busy=false;return}
+   worker.postMessage({type:'frame',bitmap,time:now,session:token,frameSeq:seq},[bitmap]);
+  }else if(detector){
+   const started=performance.now(),r=detector.detectForVideo(video,now);
+   recordInference(performance.now()-started);
+   if(token===session)accept(r.landmarks,r.worldLandmarks,now,{frameSeq:seq});
+   busy=false;
+  }else busy=false;
+ }catch(e){busy=false;if(++frameErrors>=3){if(worker)fallback();else{home();message('認識が停止しました。もう一度。',true)}}}
 }
-function accept(landmarks,world,at){if(mode!=='camera')return;lastResult=at;people.update(landmarks,world,at,video.videoWidth/video.videoHeight)}
+function accept(landmarks,world,at,meta={}){
+ if(mode!=='camera')return;
+ if(meta.frameSeq&&meta.frameSeq<lastAppliedFrameSeq)return;
+ if(meta.frameSeq)lastAppliedFrameSeq=meta.frameSeq;
+ lastResult=at;metrics.lastResultAgeMs=Math.max(0,performance.now()-at);
+ people.update(landmarks,world,at,video.videoWidth/video.videoHeight);
+}
 function map(p){if(mode==='demo')return {x:p.x*W,y:p.y*H};const s=Math.min(W/video.videoWidth,H/video.videoHeight),vw=video.videoWidth*s,vh=video.videoHeight*s;const u=p.x/(video.videoWidth/video.videoHeight);return {x:(W-vw)/2+(facing==='user'?1-u:u)*vw,y:(H-vh)/2+p.y*vh}}
 function demoPose(now){const elapsed=(now-demoAt)/1000,cycle=Math.floor(elapsed/7),t=((elapsed%7)+7)%7,k=clamp((t-3.65)/.28),genki=cycle%2===1;const p=Array.from({length:33},()=>({x:.5,y:.5,z:0,visibility:1}));const pts=genki?{0:[.5,.24],11:[.4,.35],12:[.6,.35],13:[.4,.2],14:[.6,.2],15:[.43,.1],16:[.57,.1],23:[.43,.64],24:[.57,.64],25:[.34,.86],26:[.67,.86],27:[.33,.96],28:[.69,.96]}:{0:[.5,.24],11:[.4,.35],12:[.6,.35],13:[.25,.51],14:[.64,.53],15:[.29,.56],16:[.34,.57],23:[.43,.64],24:[.57,.64],25:[.34,.86],26:[.67,.86],27:[.33,.96],28:[.69,.96]};for(const [i,[x,y]]of Object.entries(pts))p[i]={x,y,z:0,visibility:1};
  const release=genki?[[13,.7,.22],[14,.82,.23],[15,.83,.13],[16,.91,.17]]:[[13,.61,.34],[14,.7,.36],[15,.82,.34],[16,.84,.38]];
@@ -59,7 +80,8 @@ function tick(now){requestAnimationFrame(tick);const dt=Math.min(60,now-lastTime
  }
  current=mode==='camera'||mode==='demo'?people.active(now):[];
  const activeIds=new Set(current.map(t=>t.id));let loudest=0,chargingLoudest=0;let firedShot=null;
- for(const t of people.tracks){const event=t.game.step(now,dt,activeIds.has(t.id)?t.feature:null);
+ metrics.renderFrames++;
+ for(const t of people.tracks){const event=t.game.step(now,dt,people.featureForGame(t,now));
   if(event==='spill'){const spill=t.game.takeSpill();if(spill){spill.hue=COLORS[t.slot].hue;people.scatterEnergy(spill,now)}}
   if(event==='fire'){const shot=t.game.shot;const direction=shot.direction?{...shot.direction,x:mode==='camera'&&facing==='user'?-shot.direction.x:shot.direction.x}:null;fx.fire(map(shot.hand),map(shot.shoulder),shot.power,now,COLORS[t.slot].hue,shot.mode,direction);if(!firedShot||shot.power>firedShot.power)firedShot=shot}
   if(activeIds.has(t.id)&&t.game.phase==='charging'){chargingLoudest=Math.max(chargingLoudest,t.game.charge);loudest=Math.max(loudest,t.game.charge)}
@@ -74,7 +96,7 @@ function tick(now){requestAnimationFrame(tick);const dt=Math.min(60,now-lastTime
  }
  const age=fx.blasts.length?(now-Math.max(...fx.blasts.map(b=>b.at)))/1000:99;if(age<.55&&!fx.reduced){const s=(1-age/.55)*7; $('viewport').style.transform=`translate(${Math.sin(now*.071)*s}px,${Math.cos(now*.083)*s}px) scale(1.015)`}else $('viewport').style.transform='';
   people.advanceEnergy(now);
-  const actors=current.map(t=>{const b=t.smooth,c=map(b),top=map({x:b.x,y:b.top}),bottom=map({x:b.x,y:b.bottom}),edge=map({x:b.x+b.scale,y:b.y}),energyLevel=t.game.phase==='charging'?t.game.charge:t.game.reserve,chargeFeature=t.feature?.chargePoint??t.feature?.hand??(energyLevel?{x:b.x,y:b.y}:null);return {id:t.id,hue:COLORS[t.slot].hue,body:{x:c.x,y:c.y,top:top.y,bottom:bottom.y,width:Math.abs(edge.x-c.x)},point:chargeFeature?map(chargeFeature):null,charge:energyLevel,kind:t.game.phase==='charging'?t.game.mode:t.feature?.mode??t.game.reserveMode??'kame',guide:mode==='demo'?t.points.map(map):null}});
+  const actors=current.map(t=>{const b=t.smooth,c=map(b),top=map({x:b.x,y:b.top}),bottom=map({x:b.x,y:b.bottom}),edge=map({x:b.x+b.scale,y:b.y}),energyLevel=t.game.phase==='charging'?t.game.charge:t.game.reserve,display=t.displayFeature??t.feature,chargeFeature=display?.chargePoint??display?.hand??(energyLevel?{x:b.x,y:b.y}:null);return {id:t.id,hue:COLORS[t.slot].hue,body:{x:c.x,y:c.y,top:top.y,bottom:bottom.y,width:Math.abs(edge.x-c.x)},point:chargeFeature?map(chargeFeature):null,charge:energyLevel,kind:t.game.phase==='charging'?t.game.mode:display?.mode??t.game.reserveMode??'kame',guide:mode==='demo'?(t.renderPoints??t.points).map(map):null}});
   const energy=people.energy.map(e=>{const p=map(e);return {...e,x:p.x,y:p.y}});
   fx.draw(now,dt/1000,{actors,energy,intro:false});
 }
@@ -86,3 +108,4 @@ window.addEventListener('pagehide',()=>{home();worker?.terminate();worker=null;d
 window.addEventListener('pageshow',e=>{if(e.persisted)home()});
 const lifecycle=new AbortController();if(document.modelContext?.registerTool){try{Promise.resolve(document.modelContext.registerTool({name:'read_energy_state',title:'気の状態',description:'Read game mode, pose availability, charge and audio status. Does not return camera images.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute(input){if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length)throw Error('Expected empty object');return {mode,detected:current.length,people:current.map(t=>({color:COLORS[t.slot].name,phase:t.game.phase,charge:t.game.phase==='charging'?t.game.charge:t.game.reserve})),floatingEnergy:people.energy.length,audio:sound.status()}}},{signal:lifecycle.signal})).catch(()=>{})}catch{}}window.addEventListener('pagehide',()=>lifecycle.abort(),{once:true});
 requestAnimationFrame(tick);
+

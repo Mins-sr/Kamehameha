@@ -19,7 +19,7 @@ for(const side of [-1,1]){const g=new Game(),c=features(pose(false,side)),f=feat
 {const g=new Game();fill(g);const open={...charge,charge:false,close:false,releaseClose:false};for(let n=3600;n<5100;n+=50)g.step(n,50,open);assert.equal(g.phase,'idle')}
 {const g=new Game();for(let n=0;n<200;n+=50)g.step(n,50,charge);assert.equal(g.phase,'idle');g.step(210,50,null);assert.equal(g.hold,0)}
 {const g=new Game();fill(g,350);assert.notEqual(g.step(400,50,fire),'fire');g.reset();assert.equal(g.charge,0)}
-{const p=pose();p[15].visibility=.1;assert.equal(features(p),null);assert.equal(features(null),null)}
+{const p=pose();p[15].visibility=.1;assert.ok(features(p));assert.equal(features(p).gestureReady,false);assert.equal(features(null),null)}
 // Full synthetic demonstration uses the same classifier and state machine.
 {const g=new Game();let fires=0;for(let now=0;now<14000;now+=16){const t=(now/1000)%7,k=Math.max(0,Math.min(1,(t-3.65)/.28));const p=pose();for(const [i,x,y]of [[13,.61,.34],[14,.7,.36],[15,.82,.34],[16,.84,.38]]){p[i].x+=(x-p[i].x)*k;p[i].y+=(y-p[i].y)*k;p[i].z=-k*(i>14?.4:.18)}if(t>5.7){p[15].x=.23;p[16].x=.77;p[15].y=p[16].y=.75}if(g.step(now,16,features(p))==='fire')fires++}assert.equal(fires,2)}
 // Local asset references resolve; no third-party runtime fetches in app code.
@@ -79,15 +79,15 @@ const four=[0,.8,1.6,2.4].map(x=>translated(pose(),x));
  people.update([four[3],four[1],four[0],four[2]],null,100);
  for(let i=0;i<4;i++)assert.equal(people.tracks.find(t=>Math.abs(t.body.x-(.5+i*.8))<.01)?.id,ids[i]);
  assert.equal(people.tracks.find(t=>t.id===ids[1]).game.charge,.7);
- people.update([four[0],four[2],four[3]],null,200);assert.equal(people.active(200).length,3);
- people.update(four,null,300);assert.equal(people.tracks.find(t=>t.id===ids[1]).slot,1);
+ people.update([four[0],four[2],four[3]],null,200);assert.equal(people.active(200).length,4,'brief detector gap keeps the track rendered');people.update([four[0],four[2],four[3]],null,300);assert.equal(people.active(500).length,3,'the track expires after the render hold');
+ people.update(four,null,400);assert.equal(people.tracks.find(t=>t.id===ids[1]).slot,1);
  assert.equal(people.active(1300).length,0);
  people.update([],null,1800);assert.equal(people.tracks.length,0);
  people.update([...four,four[0]],null,1900);assert.equal(people.active(1900).length,4);
 }
 {
  const p=pose();p[15].visibility=p[16].visibility=0;
- const people=new People();people.update([p],null,10);assert.equal(people.active(10).length,1);assert.equal(people.tracks[0].feature,null,'aura exists even when hands cannot be read');
+ const people=new People();people.update([p],null,10);assert.equal(people.active(10).length,1);assert.equal(people.tracks[0].feature?.gestureReady,false,'aura remains when hands cannot be read');
 }
 {
  const people=new People();for(let now=0;now<3600;now+=100){people.update(four,null,now);for(const t of people.tracks)t.game.step(now,100,t.feature)}
@@ -128,6 +128,20 @@ console.log('PASS: 4 people, unique stable colors after detector reordering, tem
  people.update([],null,5500);assert.equal(people.energy.length,0,'uncollected energy fades out');
 }
 console.log('PASS: lost charge scatters, rejoin/other people can collect it, and uncollected energy expires.');
+
+// Tracking smoothing follows fast joints while keeping short gaps drawable.
+{
+ const people=new People();people.update([pose()],null,0);const first=people.tracks[0].smooth;
+ const moved=pose();for(const i of [11,12,23,24,13,14,15,16])moved[i].x+=.08;
+ people.update([moved],null,50);const second=people.tracks[0].smooth;
+ assert.ok(second.x>first.x,'body follows the new observation');
+ assert.equal(people.featureForGame(people.tracks[0],100)?.gestureReady,true);
+ assert.equal(people.featureForGame(people.tracks[0],250),null,'stale observations cannot drive gestures');
+ people.update([],null,150);assert.equal(people.active(150).length,1);
+ assert.ok(people.active(150)[0].smooth.x>=second.x,'brief gaps use predicted rendering');
+}
+console.log('PASS: adaptive pose smoothing, render prediction, and stale gesture rejection.');
+
 {
  const source=readFileSync('src/app.js','utf8'),snippet=source.slice(source.indexOf('function demoPose('),source.indexOf('\nfunction tick('));
  const demo=Function('clamp',`const demoAt=0;${snippet};return demoPose`)((v,a=0,b=1)=>Math.max(a,Math.min(b,v)));
@@ -136,3 +150,4 @@ console.log('PASS: lost charge scatters, rejoin/other people can collect it, and
  assert.equal(fires.size,4,'all four demo people must charge and fire');
  console.log('PASS: actual four-person demo reaches a shot for every color.');
 }
+
