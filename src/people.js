@@ -3,7 +3,7 @@ export const COLORS=[{name:'青',hue:195},{name:'金',hue:42},{name:'桃',hue:32
 const TRACK_MAX_AGE_MS=1400;
 const RENDER_HOLD_MS=220;
 const GAME_FRESH_MS=130;
-const PREDICT_LIMIT_MS=180;
+const PREDICT_LIMIT_MS=60;
 const visible=(p,min=.22)=>p&&(p.visibility??p.presence??0)>min&&Number.isFinite(p.x)&&Number.isFinite(p.y);
 const midpoint=(a,b)=>({x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:((a.z||0)+(b.z||0))/2});
 export function body(p){
@@ -20,23 +20,31 @@ export function body(p){
 function signature(b){
  return {orientation:Math.atan2(b.hip.y-b.shoulder.y,b.hip.x-b.shoulder.x),width:b.width,scale:b.scale};
 }
-function smoothPose(previous,next,dt){
- if(!next)return previous;
- if(!previous)return next.map(v=>({...v}));
- const speed=next.reduce((sum,p,i)=>{const q=previous[i];return sum+(visible(p,.05)&&visible(q,.05)?Math.hypot(p.x-q.x,p.y-q.y):0)},0)/(next.length||1)/Math.max(.016,dt);
- return next.map((p,i)=>{
-  const q=previous[i];
-  if(!visible(p,.05))return q?{...q,visibility:Math.max(0,(q.visibility??0)*.82)}:{...p};
-  const alpha=clamp(.22+speed*1.6,.22,.86);
+function smoothPose(previous,next,dt,previousVelocity=[]){
+ if(!next)return {points:previous||[],velocities:previousVelocity};
+ if(!previous)return {points:next.map(v=>({...v})),velocities:next.map(()=>({x:0,y:0,z:0}))};
+ const safeDt=Math.max(.016,dt),points=[],velocities=[];
+ for(let i=0;i<next.length;i++){
+  const p=next[i],q=previous[i],old=previousVelocity[i]||{x:0,y:0,z:0};
+  if(!visible(p,.05)){
+   points.push(q?{...q,visibility:Math.max(0,(q.visibility??0)*.82)}:{...p});
+   velocities.push({x:old.x*.72,y:old.y*.72,z:old.z*.72});
+   continue;
+  }
+  const raw={x:((p.x??q?.x??0)-(q?.x??p.x??0))/safeDt,y:((p.y??q?.y??0)-(q?.y??p.y??0))/safeDt,z:((p.z??q?.z??0)-(q?.z??p.z??0))/safeDt};
+  const speed=Math.hypot(raw.x,raw.y);
+  const alpha=clamp(.22+speed*1.35,.22,.9);
   const confidence=Math.max(.25,Math.min(1,(p.visibility??p.presence??1)));
-  const w=clamp(alpha*(.55+.45*confidence),.18,.9);
-  return {...p,x:(q?.x??p.x)*(1-w)+p.x*w,y:(q?.y??p.y)*(1-w)+p.y*w,z:(q?.z??p.z??0)*(1-w)+(p.z??0)*w};
- });
+  const w=clamp(alpha*(.55+.45*confidence),.18,.92);
+  points.push({...p,x:(q?.x??p.x)*(1-w)+p.x*w,y:(q?.y??p.y)*(1-w)+p.y*w,z:(q?.z??p.z??0)*(1-w)+(p.z??0)*w});
+  velocities.push({x:old.x*.55+raw.x*.45,y:old.y*.55+raw.y*.45,z:old.z*.55+raw.z*.45});
+ }
+ return {points,velocities};
 }
-function predictPose(points,seconds,vx,vy){
+function predictPose(points,seconds,velocities=[]){
  if(!points)return null;
  const t=Math.min(seconds*1000,PREDICT_LIMIT_MS)/1000;
- return points.map(p=>({...p,x:p.x+vx*t,y:p.y+vy*t}));
+ return points.map((p,i)=>{const v=velocities[i]||{x:0,y:0};return {...p,x:p.x+v.x*t,y:p.y+v.y*t}});
 }
 function displayFeature(feature,points){
  if(!feature||!points)return feature;
@@ -49,21 +57,21 @@ function displayFeature(feature,points){
 function predictTrack(t,at){
  const age=Math.max(0,at-t.at);
  if(age>RENDER_HOLD_MS||!t.renderPoints)return;
- const predicted=predictPose(t.renderPoints,age/1000,t.vx,t.vy);
+ const predicted=predictPose(t.renderPoints,age/1000,t.jointVelocity);
  const predictedBody=body(predicted);
- if(predictedBody){t.smooth=predictedBody;t.displayFeature=displayFeature(t.feature,predicted)}
+ if(predictedBody){t.renderBody=predictedBody;t.renderFeature=displayFeature(t.feature,predicted)}
  t.present=true;t.missedMs=age;t.observationFresh=age<=GAME_FRESH_MS;
 }
 export class People{
  constructor(){this.reset()}
- reset(){this.tracks=[];this.nextId=1;this.energy=[];this.energyAt=null;this.energyId=1;this.collectedEnergy=0}
+ reset(){this.tracks=[];this.nextId=1;this.observationId=1;this.energy=[];this.energyAt=null;this.energyId=1;this.collectedEnergy=0}
  update(poses,world,at,aspect=1){
   this.advanceEnergy(at);this.collectedEnergy=0;
   const detections=(poses||[]).map((p,i)=>{
    if(!Array.isArray(p))return null;
    const points=p.map(v=>({...v,x:v.x*aspect}));
    const b=body(points);if(!b)return null;
-   const f=features(points,world?.[i]);if(f)f.sampleAt=at;
+   const f=features(points,world?.[i]);
    return {body:b,points,feature:f,signature:signature(b)};
   }).filter(Boolean);
   this.tracks=this.tracks.filter(t=>at-t.at<TRACK_MAX_AGE_MS);
@@ -92,26 +100,39 @@ export class People{
   };
   assign(0,new Set(),0,[]);
   const retained=[],usedSlots=new Set(),matchedOld=new Set();
+  for(const j of best.pairs)if(j>=0){matchedOld.add(j);usedSlots.add(old[j].slot)}
+  const associationAmbiguous=(t,d,j)=>{
+   const assigned=cost(t,d);
+   let alternative=Infinity;
+   for(let k=0;k<old.length;k++)if(k!==j)alternative=Math.min(alternative,cost(old[k],d));
+   return Number.isFinite(alternative)&&alternative-assigned<.18;
+  };
   const updateTrack=(t,d)=>{
    const dt=Math.min(.4,Math.max(.016,(at-t.at)/1000));
    const previous=t.smooth||t.body;
    t.vx=.55*t.vx+.45*(d.body.x-previous.x)/dt;
    t.vy=.55*t.vy+.45*(d.body.y-previous.y)/dt;
    if(at-t.at>650)t.game.reset();
-   t.renderPoints=smoothPose(t.renderPoints||t.points,d.points,dt);
-   t.smooth=body(t.renderPoints)||d.body;
-   t.body=d.body;t.points=d.points;t.feature=d.feature;t.displayFeature=displayFeature(d.feature,t.renderPoints);
+   const filtered=smoothPose(t.renderPoints||t.points,d.points,dt,t.jointVelocity);
+   t.renderPoints=filtered.points;t.jointVelocity=filtered.velocities;
+   t.smooth=body(t.renderPoints)||d.body;t.renderBody=t.smooth;
+   t.body=d.body;t.points=d.points;t.feature=d.feature;t.renderFeature=displayFeature(d.feature,t.renderPoints);
    t.signature=d.signature;t.at=at;t.lastSeenAt=at;t.missedMs=0;t.present=true;t.observationFresh=true;
+   const assignedIndex=old.indexOf(t),ambiguous=assignedIndex>=0&&associationAmbiguous(t,d,assignedIndex);
+   t.associationAmbiguous=ambiguous;t.associationBlockedUntil=ambiguous?at+180:Math.max(t.associationBlockedUntil??0,at);
+   t.observationId=this.observationId++;t.feature&&(t.feature.sampleAt=at,t.feature.observationId=t.observationId);
    return t;
   };
   for(let i=0;i<detections.length;i++){
    const d=detections[i],j=best.pairs[i];
    if(j>=0){
-    const t=updateTrack(old[j],d);retained.push(t);usedSlots.add(t.slot);matchedOld.add(j);continue;
+    const t=updateTrack(old[j],d);retained.push(t);continue;
    }
    const free=COLORS.findIndex((_,slot)=>!usedSlots.has(slot));
    if(free<0)continue;
-   const t={id:this.nextId++,slot:free,game:new Game(),vx:0,vy:0,body:d.body,smooth:d.body,renderPoints:d.points,points:d.points,feature:d.feature,displayFeature:displayFeature(d.feature,d.points),signature:d.signature,at, lastSeenAt:at,missedMs:0,present:true,observationFresh:true};
+   const observationId=this.observationId++;
+   if(d.feature){d.feature.sampleAt=at;d.feature.observationId=observationId}
+   const t={id:this.nextId++,slot:free,game:new Game(),vx:0,vy:0,jointVelocity:d.points.map(()=>({x:0,y:0,z:0})),body:d.body,smooth:d.body,renderBody:d.body,renderPoints:d.points,points:d.points,feature:d.feature,renderFeature:displayFeature(d.feature,d.points),signature:d.signature,at, lastSeenAt:at,missedMs:0,present:true,observationFresh:true,observationId,associationAmbiguous:false,associationBlockedUntil:0};
    retained.push(t);usedSlots.add(free);
   }
   for(let i=0;i<old.length&&retained.length<4;i++){
@@ -124,7 +145,7 @@ export class People{
   this.collectEnergy(at);
   return this.active(at);
  }
- featureForGame(t,at){return t&&t.present&&at-t.at<=GAME_FRESH_MS?t.feature:null}
+ featureForGame(t,at){return t&&t.present&&at-t.at<=GAME_FRESH_MS&&at>=(t.associationBlockedUntil??0)&&!t.associationAmbiguous?t.feature:null}
  advanceEnergy(at){
   if(this.energyAt===null){this.energyAt=at;return}
   const dt=Math.max(0,(at-this.energyAt)/1000);this.energyAt=at;if(!dt)return;
@@ -158,7 +179,7 @@ export class People{
  active(now){
   for(const t of this.tracks){
    const age=Math.max(0,now-t.at);
-   if(age<=RENDER_HOLD_MS){t.present=true;predictTrack(t,now)}else{t.present=false;t.observationFresh=false}
+   if(age<=RENDER_HOLD_MS){t.present=true;predictTrack(t,now)}else{t.present=false;t.observationFresh=false;t.renderBody=t.smooth;t.renderFeature=t.feature}
   }
   return this.tracks.filter(t=>t.present&&now-t.at<=RENDER_HOLD_MS);
  }

@@ -142,6 +142,35 @@ console.log('PASS: lost charge scatters, rejoin/other people can collect it, and
 }
 console.log('PASS: adaptive pose smoothing, render prediction, and stale gesture rejection.');
 
+// Rendering must not alter the observation state, and a new person must not reuse an occupied color.
+{
+ const left=translated(pose(),0),right=translated(pose(),.8),newcomer=translated(pose(),1.6);
+ const people=new People();people.update([left,right],null,0);
+ const originalSlots=people.tracks.map(t=>({x:t.body.x,slot:t.slot}));
+ people.update([newcomer,left,right],null,50);
+ assert.equal(new Set(people.tracks.map(t=>t.slot)).size,3,'new detection must not duplicate an existing color slot');
+ for(const original of originalSlots){const track=people.tracks.find(t=>Math.abs(t.body.x-original.x)<.01);assert.equal(track?.slot,original.slot)}
+ const run=(withRenders)=>{const p=new People();p.update([pose()],null,0);const moved=pose();for(const i of [11,12,23,24,13,14,15,16])moved[i].x+=.05;p.update([moved],null,50);if(withRenders)for(const at of [55,64,72,81,95])p.active(at);const movedAgain=pose();for(const i of [11,12,23,24,13,14,15,16])movedAgain[i].x+=.1;p.update([movedAgain],null,100);return {x:p.tracks[0].smooth.x,vx:p.tracks[0].vx}}
+ const withoutRenders=run(false),withRenders=run(true);
+ assert.ok(Math.abs(withoutRenders.x-withRenders.x)<1e-9,'render prediction must not change observed position');
+ assert.ok(Math.abs(withoutRenders.vx-withRenders.vx)<1e-9,'render prediction must not change observed velocity');
+}
+console.log('PASS: occupied color slots stay unique and render timing does not alter tracking state.');
+
+// A repeated result cannot charge a technique, while a partial torso remains trackable.
+{
+ const g=new Game(),same={...charge,observationId:1,sampleAt:0};
+ for(let now=0;now<1000;now+=16)g.step(now,16,same);
+ assert.equal(g.phase,'idle','repeated observation must not advance the charge hold');
+ const oneHipMissing=pose();oneHipMissing[23].visibility=0;const partial=features(oneHipMissing);
+ assert.ok(partial,'one hidden hip must not discard the torso');assert.equal(partial.bodyReady,true);
+ const armsMissing=pose();armsMissing[15].visibility=armsMissing[16].visibility=0;const partialArms=features(armsMissing);
+ assert.ok(partialArms);assert.equal(partialArms.gestureReady,false);
+ const charging=new Game();fill(charging);let event=null;for(let now=3600;now<4100;now+=50)event=charging.step(now,50,partialArms)||event;
+ assert.equal(event,null,'brief arm occlusion must hold the charge without firing or scattering');
+}
+console.log('PASS: repeated observations do not charge and partial occlusion preserves torso tracking.');
+
 {
  const source=readFileSync('src/app.js','utf8'),snippet=source.slice(source.indexOf('function demoPose('),source.indexOf('\nfunction tick('));
  const demo=Function('clamp',`const demoAt=0;${snippet};return demoPose`)((v,a=0,b=1)=>Math.max(a,Math.min(b,v)));

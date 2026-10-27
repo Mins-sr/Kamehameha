@@ -13,8 +13,11 @@ function angle(a,b,c){
 // Torso tracking remains available when one or more arm landmarks are missing.
 // Gesture actions require a fresh, high-quality upper-body observation.
 export function features(p,world){
- if(!p||[11,12,23,24].some(i=>!visible(p[i],.24)))return null;
- const shoulder=mid(p[11],p[12]),hip=mid(p[23],p[24]);
+ if(!p)return null;
+ const shoulders=[p[11],p[12]].filter(v=>visible(v,.24));
+ const hips=[p[23],p[24]].filter(v=>visible(v,.24));
+ if(shoulders.length<2||hips.length<1)return null;
+ const shoulder=mid(p[11],p[12]),hip=hips.length===2?mid(p[23],p[24]):{...hips[0]};
  const wrists=[p[15],p[16]].filter(v=>visible(v,.28));
  const elbows=[p[13],p[14]].filter(v=>visible(v,.28));
  const hand=wrists.length===2?midpoint(p[15],p[16]):wrists[0]||shoulder;
@@ -37,7 +40,8 @@ export function features(p,world){
  return {hand,shoulder,hip,scale,relative,depth,extension,close,releaseClose:gestureReady&&handGap<1.55,
   overhead,genkiCharge,kameCharge,mode,charge:Boolean(mode),chargePoint:hand,
   extended:gestureReady&&close&&(extension>147||depth>1.05),gestureReady,
-  quality:{torso:Math.min(...[11,12,23,24].map(i=>confidence(p[i]))),arms:Math.min(...[13,14,15,16].map(i=>confidence(p[i])))}
+  bodyReady:true,
+  quality:{torso:Math.min(...[11,12,...(hips.length===2?[23,24]:[hips[0]===p[23]?23:24])].map(i=>confidence(p[i]))),arms:Math.min(...[13,14,15,16].map(i=>confidence(p[i])||0))}
  };
 }
 function midpoint(a,b){return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:((a.z||0)+(b.z||0))/2}}
@@ -45,7 +49,7 @@ export class Game{
  constructor(){this.reset()}
  reset({keepReserve=false}={}){
   const reserve=keepReserve?this.reserve??0:0,reserveMode=keepReserve?this.reserveMode??null:null;
-  this.phase='idle';this.mode=null;this.charge=0;this.chargeTime=0;this.hold=0;this.lost=0;this.anchor=null;this.until=0;this.shot=null;this.last=null;this.previousAt=0;this.pushSince=null;this.pushSample=null;this.spill=null;this.reserve=reserve;this.reserveMode=reserveMode;
+  this.phase='idle';this.mode=null;this.charge=0;this.chargeTime=0;this.hold=0;this.lost=0;this.partialLost=0;this.anchor=null;this.until=0;this.shot=null;this.last=null;this.previousAt=0;this.pushSince=null;this.pushSample=null;this.spill=null;this.reserve=reserve;this.reserveMode=reserveMode;this.lastObservationId=null;this.lastSampleAt=null;
  }
  addEnergy(amount,mode=null){
   if(!(amount>0)||this.phase==='blast'||this.phase==='cooldown')return 0;
@@ -59,9 +63,14 @@ export class Game{
  takeSpill(){const spill=this.spill;this.spill=null;return spill}
  step(now,dt,f){
   const gestureAvailable=Boolean(f&&f.gestureReady!==false);
+  const hasObservationId=Boolean(f&&('observationId' in f||'sampleAt' in f));
+  const newObservation=Boolean(f)&&(!hasObservationId||f.observationId!==this.lastObservationId);
+  const sampleAt=f?.sampleAt??now;
+  const observationDt=newObservation?(this.lastSampleAt===null?dt:Math.max(0,Math.min(120,sampleAt-this.lastSampleAt))):0;
+  if(newObservation){this.lastObservationId=f.observationId??null;this.lastSampleAt=sampleAt}
   if(this.phase==='blast'){if(now>=this.until){this.phase='cooldown';this.until=now+900;return 'end'}return null}
   if(this.phase==='cooldown'){if(now>=this.until)this.reset();return null}
-  if(!gestureAvailable){
+  if(!f){
    this.pushSince=null;this.pushSample=null;this.hold=0;this.lost+=dt;
    if(this.lost>LOSS_TO_SPILL_MS&&this.phase==='charging'&&this.charge>.02){
     const last=this.last,spill={x:last?.hand?.x??this.anchor?.x??0,y:last?.hand?.y??this.anchor?.y??0,amount:this.charge,mode:this.mode};
@@ -69,9 +78,18 @@ export class Game{
    }
    return null;
   }
-  this.lost=0;this.last=f;this.previousAt=now;
+  if(!gestureAvailable){
+   this.pushSince=null;this.pushSample=null;this.hold=0;this.lost=0;this.partialLost+=dt;
+   if(this.partialLost>600&&this.phase==='charging'&&this.charge>.02){
+    const last=this.last,spill={x:last?.hand?.x??this.anchor?.x??0,y:last?.hand?.y??this.anchor?.y??0,amount:this.charge,mode:this.mode};
+    this.reset();this.spill=spill;return 'spill';
+   }
+   return null;
+  }
+  this.lost=0;this.partialLost=0;this.last=f;this.previousAt=now;
   if(this.phase==='idle'){
-   this.hold=f.charge?this.hold+dt:0;
+   if(!newObservation)return null;
+   this.hold=f.charge?this.hold+observationDt:0;
    if(this.hold>=280){this.phase='charging';this.mode=f.mode||this.reserveMode||'kame';this.anchor={...f.relative,depth:f.depth,extension:f.extension};this.chargeTime=Math.min(MAX_CHARGE_MS,200+this.reserve*MAX_CHARGE_MS);this.reserve=0;this.reserveMode=null;this.charge=this.chargeTime/MAX_CHARGE_MS;return 'charge'}return null;
   }
   const dx=f.relative.x-this.anchor.x,dy=f.relative.y-this.anchor.y;
@@ -86,7 +104,7 @@ export class Game{
   const handsTogether=f.releaseClose??f.close;
   const releaseHeight=this.mode==='genki'?dy<.72:dy<.2;
   const pushing=this.charge>.18&&handsTogether&&releaseHeight&&(projectedPush||forwardPush);
-  if(pushing){
+  if(pushing&&newObservation){
    const sample=f.sampleAt??now;
    if(this.pushSince===null){this.pushSince=now;this.pushSample=sample}
    if(now-this.pushSince>=65&&sample!==this.pushSample){
@@ -99,8 +117,9 @@ export class Game{
     return 'fire';
    }
   }else{this.pushSince=null;this.pushSample=null}
-  if(f.charge){this.chargeTime=Math.min(MAX_CHARGE_MS,this.chargeTime+dt);this.charge=this.chargeTime/MAX_CHARGE_MS;this.hold=0}
-  else{this.hold+=dt;if(!(f.releaseClose??f.close)||this.hold>1100){this.chargeTime=Math.max(0,this.chargeTime-dt*(MAX_CHARGE_MS/650));this.charge=this.chargeTime/MAX_CHARGE_MS;if(this.charge===0){this.reset();return 'cancel'}}}
+  if(!newObservation)return null;
+  if(f.charge){this.chargeTime=Math.min(MAX_CHARGE_MS,this.chargeTime+observationDt);this.charge=this.chargeTime/MAX_CHARGE_MS;this.hold=0}
+  else{this.hold+=observationDt;if(!(f.releaseClose??f.close)||this.hold>1100){this.chargeTime=Math.max(0,this.chargeTime-observationDt*(MAX_CHARGE_MS/650));this.charge=this.chargeTime/MAX_CHARGE_MS;if(this.charge===0){this.reset();return 'cancel'}}}
   return null;
  }
 }

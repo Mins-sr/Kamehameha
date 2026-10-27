@@ -63,7 +63,7 @@ function accept(landmarks,world,at,meta={}){
  if(meta.frameSeq&&meta.frameSeq<lastAppliedFrameSeq)return;
  if(meta.frameSeq)lastAppliedFrameSeq=meta.frameSeq;
  lastResult=at;metrics.lastResultAgeMs=Math.max(0,performance.now()-at);
- people.update(landmarks,world,at,video.videoWidth/video.videoHeight);
+  people.update(landmarks,world,at,video.videoWidth/video.videoHeight,meta.frameSeq);
 }
 function map(p){if(mode==='demo')return {x:p.x*W,y:p.y*H};const s=Math.min(W/video.videoWidth,H/video.videoHeight),vw=video.videoWidth*s,vh=video.videoHeight*s;const u=p.x/(video.videoWidth/video.videoHeight);return {x:(W-vw)/2+(facing==='user'?1-u:u)*vw,y:(H-vh)/2+p.y*vh}}
 function demoPose(now){const elapsed=(now-demoAt)/1000,cycle=Math.floor(elapsed/7),t=((elapsed%7)+7)%7,k=clamp((t-3.65)/.28),genki=cycle%2===1;const p=Array.from({length:33},()=>({x:.5,y:.5,z:0,visibility:1}));const pts=genki?{0:[.5,.24],11:[.4,.35],12:[.6,.35],13:[.4,.2],14:[.6,.2],15:[.43,.1],16:[.57,.1],23:[.43,.64],24:[.57,.64],25:[.34,.86],26:[.67,.86],27:[.33,.96],28:[.69,.96]}:{0:[.5,.24],11:[.4,.35],12:[.6,.35],13:[.25,.51],14:[.64,.53],15:[.29,.56],16:[.34,.57],23:[.43,.64],24:[.57,.64],25:[.34,.86],26:[.67,.86],27:[.33,.96],28:[.69,.96]};for(const [i,[x,y]]of Object.entries(pts))p[i]={x,y,z:0,visibility:1};
@@ -96,7 +96,7 @@ function tick(now){requestAnimationFrame(tick);const dt=Math.min(60,now-lastTime
  }
  const age=fx.blasts.length?(now-Math.max(...fx.blasts.map(b=>b.at)))/1000:99;if(age<.55&&!fx.reduced){const s=(1-age/.55)*7; $('viewport').style.transform=`translate(${Math.sin(now*.071)*s}px,${Math.cos(now*.083)*s}px) scale(1.015)`}else $('viewport').style.transform='';
   people.advanceEnergy(now);
-  const actors=current.map(t=>{const b=t.smooth,c=map(b),top=map({x:b.x,y:b.top}),bottom=map({x:b.x,y:b.bottom}),edge=map({x:b.x+b.scale,y:b.y}),energyLevel=t.game.phase==='charging'?t.game.charge:t.game.reserve,display=t.displayFeature??t.feature,chargeFeature=display?.chargePoint??display?.hand??(energyLevel?{x:b.x,y:b.y}:null);return {id:t.id,hue:COLORS[t.slot].hue,body:{x:c.x,y:c.y,top:top.y,bottom:bottom.y,width:Math.abs(edge.x-c.x)},point:chargeFeature?map(chargeFeature):null,charge:energyLevel,kind:t.game.phase==='charging'?t.game.mode:display?.mode??t.game.reserveMode??'kame',guide:mode==='demo'?(t.renderPoints??t.points).map(map):null}});
+  const actors=current.map(t=>{const b=t.renderBody??t.smooth,c=map(b),top=map({x:b.x,y:b.top}),bottom=map({x:b.x,y:b.bottom}),edge=map({x:b.x+b.scale,y:b.y}),energyLevel=t.game.phase==='charging'?t.game.charge:t.game.reserve,display=t.renderFeature??t.displayFeature??t.feature,chargeFeature=display?.chargePoint??display?.hand??(energyLevel?{x:b.x,y:b.y}:null);return {id:t.id,hue:COLORS[t.slot].hue,body:{x:c.x,y:c.y,top:top.y,bottom:bottom.y,width:Math.abs(edge.x-c.x)},point:chargeFeature?map(chargeFeature):null,charge:energyLevel,kind:t.game.phase==='charging'?t.game.mode:display?.mode??t.game.reserveMode??'kame',guide:mode==='demo'?(t.renderPoints??t.points).map(map):null}});
   const energy=people.energy.map(e=>{const p=map(e);return {...e,x:p.x,y:p.y}});
   fx.draw(now,dt/1000,{actors,energy,intro:false});
 }
