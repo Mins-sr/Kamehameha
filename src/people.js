@@ -4,6 +4,8 @@ const TRACK_MAX_AGE_MS=1400;
 const RENDER_HOLD_MS=220;
 const GAME_FRESH_MS=130;
 const PREDICT_LIMIT_MS=60;
+const ASSOCIATION_MARGIN=.22;
+const TORSO_JOINTS=[11,12,23,24];
 const visible=(p,min=.22)=>p&&(p.visibility??p.presence??0)>min&&Number.isFinite(p.x)&&Number.isFinite(p.y);
 const midpoint=(a,b)=>({x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:((a.z||0)+(b.z||0))/2});
 export function body(p){
@@ -17,8 +19,36 @@ export function body(p){
  const feet=[p[27],p[28]].filter(v=>visible(v)),bottom=feet.length?Math.max(hip.y+scale*.4,...feet.map(v=>v.y))+scale*.1:hip.y+scale*1.5;
  return {x:(s.x+hip.x)/2,y:(s.y+hip.y)/2,scale,top,bottom,shoulder:s,hip,width};
 }
-function signature(b){
- return {orientation:Math.atan2(b.hip.y-b.shoulder.y,b.hip.x-b.shoulder.x),width:b.width,scale:b.scale};
+function signature(b,points){
+ return {orientation:Math.atan2(b.hip.y-b.shoulder.y,b.hip.x-b.shoulder.x),width:b.width,scale:b.scale,
+  widthReliable:[11,12].every(i=>visible(points[i])),torsoReliable:TORSO_JOINTS.every(i=>visible(points[i]))};
+}
+function associationCost(t,d,at){
+ // Use observations, never the render filter, to extrapolate a person's path.
+ const dt=Math.min(.45,Math.max(0,(at-t.at)/1000)),b=t.body;
+ const dx=t.vx*dt,dy=t.vy*dt,s=Math.max(.06,b.scale,d.body.scale);
+ const distance=Math.hypot(d.body.x-b.x-dx,d.body.y-b.y-dy)/s;
+ if(distance>1.25)return Infinity;
+ const joints=TORSO_JOINTS.filter(i=>visible(t.points[i])&&visible(d.points[i]));
+ const jointDistance=joints.length?joints.reduce((sum,i)=>sum+Math.hypot(d.points[i].x-t.points[i].x-dx,d.points[i].y-t.points[i].y-dy)/s,0)/joints.length:distance;
+ const a=t.signature,c=d.signature;
+ const width=a.widthReliable&&c.widthReliable?Math.abs(Math.log(Math.max(.02,c.width)/Math.max(.02,a.width))):0;
+ // Shoulder width is supporting evidence, not a hard identity gate: turning
+ // sideways can sharply shrink it without changing the person.
+ const orientation=a.torsoReliable&&c.torsoReliable?Math.abs(Math.atan2(Math.sin(c.orientation-a.orientation),Math.cos(c.orientation-a.orientation))):0;
+ return distance+.35*jointDistance+.45*width+.12*orientation+.25*Math.abs(Math.log(c.scale/a.scale));
+}
+function assignment(costs,forbiddenI=-1,forbiddenJ=-1){
+ let best={cost:Infinity,pairs:[]};
+ const visit=(i,used,sum,pairs)=>{
+  if(sum>=best.cost)return;
+  if(i===costs.length){best={cost:sum,pairs:[...pairs]};return}
+  visit(i+1,used,sum+1.5,[...pairs,-1]);
+  for(let j=0;j<costs[i].length;j++)if(!used.has(j)&&!(i===forbiddenI&&j===forbiddenJ)&&costs[i][j]<1.5){
+   used.add(j);visit(i+1,used,sum+costs[i][j],[...pairs,j]);used.delete(j);
+  }
+ };
+ visit(0,new Set(),0,[]);return best;
 }
 function smoothPose(previous,next,dt,previousVelocity=[]){
  if(!next)return {points:previous||[],velocities:previousVelocity};
@@ -56,7 +86,7 @@ function displayFeature(feature,points){
 }
 function predictTrack(t,at){
  const age=Math.max(0,at-t.at);
- if(age>RENDER_HOLD_MS||!t.renderPoints)return;
+ if(t.associationAmbiguous||age>RENDER_HOLD_MS||!t.renderPoints)return;
  const predicted=predictPose(t.renderPoints,age/1000,t.jointVelocity);
  const predictedBody=body(predicted);
  if(predictedBody){t.renderBody=predictedBody;t.renderFeature=displayFeature(t.feature,predicted)}
@@ -72,61 +102,57 @@ export class People{
    const points=p.map(v=>({...v,x:v.x*aspect}));
    const b=body(points);if(!b)return null;
    const f=features(points,world?.[i]);
-   return {body:b,points,feature:f,signature:signature(b)};
-  }).filter(Boolean);
+   return {body:b,points,feature:f,signature:signature(b,points)};
+  }).filter(Boolean).slice(0,COLORS.length);
   this.tracks=this.tracks.filter(t=>at-t.at<TRACK_MAX_AGE_MS);
   const old=this.tracks;
-  const cost=(t,d)=>{
-   const dt=Math.min(.4,Math.max(.016,(at-t.at)/1000));
-   const base=t.smooth||t.body,predX=base.x+t.vx*dt,predY=base.y+t.vy*dt;
-   const s=Math.max(.06,base.scale,d.body.scale);
-   const distance=Math.hypot(d.body.x-predX,d.body.y-predY)/s;
-   if(distance>1.65)return Infinity;
-   const shape=t.signature&&d.signature
-    ?Math.min(.8,Math.abs(Math.atan2(Math.sin(d.signature.orientation-t.signature.orientation),Math.cos(d.signature.orientation-t.signature.orientation)))*.16+
-      Math.abs(Math.log(Math.max(.5,d.signature.width)/Math.max(.5,t.signature.width)))*.25)
-    :0;
-   return distance+.25*Math.abs(Math.log(d.body.scale/Math.max(.06,base.scale)))+shape;
-  };
-  let best={cost:Infinity,pairs:[]};
-  const assign=(i,used,sum,pairs)=>{
-   if(sum>=best.cost)return;
-   if(i===detections.length){best={cost:sum,pairs:[...pairs]};return}
-   assign(i+1,used,sum+1.5,[...pairs,-1]);
-   for(let j=0;j<old.length;j++)if(!used.has(j)){
-    const c=cost(old[j],detections[i]);
-    if(c<1.5){used.add(j);assign(i+1,used,sum+c,[...pairs,j]);used.delete(j)}
+  // Score the entire frame before mutating any track. Compare competing global
+  // assignments so a merge, split or crossing cannot silently swap game state.
+  const costs=detections.map(d=>old.map(t=>associationCost(t,d,at)));
+  const best=assignment(costs),ambiguousTracks=new Set(),ambiguousDetections=new Set();
+  for(let i=0;i<best.pairs.length;i++){
+   const j=best.pairs[i];if(j<0)continue;
+   const alternative=assignment(costs,i,j);
+   if(alternative.cost-best.cost>=ASSOCIATION_MARGIN)continue;
+   for(let k=0;k<best.pairs.length;k++)if(best.pairs[k]!==alternative.pairs[k]){
+    ambiguousDetections.add(k);
+    if(best.pairs[k]>=0)ambiguousTracks.add(best.pairs[k]);
+    if(alternative.pairs[k]>=0)ambiguousTracks.add(alternative.pairs[k]);
    }
-  };
-  assign(0,new Set(),0,[]);
-  const retained=[],usedSlots=new Set(),matchedOld=new Set();
-  for(const j of best.pairs)if(j>=0){matchedOld.add(j);usedSlots.add(old[j].slot)}
-  const associationAmbiguous=(t,d,j)=>{
-   const assigned=cost(t,d);
-   let alternative=Infinity;
-   for(let k=0;k<old.length;k++)if(k!==j)alternative=Math.min(alternative,cost(old[k],d));
-   return Number.isFinite(alternative)&&alternative-assigned<.18;
-  };
+  }
+  const retained=[],usedSlots=new Set(old.map(t=>t.slot)),matchedOld=new Set();
+  for(const j of ambiguousTracks){old[j].associationAmbiguous=true;old[j].pending=null}
   const updateTrack=(t,d)=>{
    const dt=Math.min(.4,Math.max(.016,(at-t.at)/1000));
-   const previous=t.smooth||t.body;
-   t.vx=.55*t.vx+.45*(d.body.x-previous.x)/dt;
-   t.vy=.55*t.vy+.45*(d.body.y-previous.y)/dt;
-   if(at-t.at>650)t.game.reset();
+   const previous=t.body,gap=at-t.at;
+   t.vx=gap>650?0:.35*t.vx+.65*(d.body.x-previous.x)/dt;
+   t.vy=gap>650?0:.35*t.vy+.65*(d.body.y-previous.y)/dt;
+   if(gap>650)t.game.reset();
    const filtered=smoothPose(t.renderPoints||t.points,d.points,dt,t.jointVelocity);
    t.renderPoints=filtered.points;t.jointVelocity=filtered.velocities;
    t.smooth=body(t.renderPoints)||d.body;t.renderBody=t.smooth;
    t.body=d.body;t.points=d.points;t.feature=d.feature;t.renderFeature=displayFeature(d.feature,t.renderPoints);
    t.signature=d.signature;t.at=at;t.lastSeenAt=at;t.missedMs=0;t.present=true;t.observationFresh=true;
-   const assignedIndex=old.indexOf(t),ambiguous=assignedIndex>=0&&associationAmbiguous(t,d,assignedIndex);
-   t.associationAmbiguous=ambiguous;t.associationBlockedUntil=ambiguous?at+180:Math.max(t.associationBlockedUntil??0,at);
+   t.associationAmbiguous=false;t.pending=null;
    t.observationId=this.observationId++;t.feature&&(t.feature.sampleAt=at,t.feature.observationId=t.observationId);
    return t;
   };
   for(let i=0;i<detections.length;i++){
    const d=detections[i],j=best.pairs[i];
+   if(ambiguousDetections.has(i)||(j>=0&&ambiguousTracks.has(j)))continue;
    if(j>=0){
-    const t=updateTrack(old[j],d);retained.push(t);continue;
+    const t=old[j];
+    if(t.associationAmbiguous||at-t.at>RENDER_HOLD_MS){
+     // Require a second consistent observation before reattaching an occluded
+     // track. Pending candidates never overwrite its trusted pose or velocity.
+     const pending=t.pending;
+     const consistent=pending&&at-pending.at<=350&&Math.hypot(d.body.x-pending.body.x,d.body.y-pending.body.y)<d.body.scale*.75;
+     if(!consistent||at-pending.since<60){
+      t.pending={body:d.body,at,since:consistent?pending.since:at};t.associationAmbiguous=true;continue;
+     }
+     t.associationBlockedUntil=at+180;
+    }
+    retained.push(updateTrack(t,d));matchedOld.add(j);continue;
    }
    const free=COLORS.findIndex((_,slot)=>!usedSlots.has(slot));
    if(free<0)continue;
@@ -136,7 +162,7 @@ export class People{
    retained.push(t);usedSlots.add(free);
   }
   for(let i=0;i<old.length&&retained.length<4;i++){
-   const t=old[i];if(matchedOld.has(i)||usedSlots.has(t.slot)||at-t.at>=TRACK_MAX_AGE_MS)continue;
+   const t=old[i];if(matchedOld.has(i)||at-t.at>=TRACK_MAX_AGE_MS)continue;
    t.present=false;t.observationFresh=false;predictTrack(t,at);
    retained.push(t);usedSlots.add(t.slot);
   }
@@ -162,7 +188,7 @@ export class People{
  }
  collectEnergy(at){
   if(!this.energy.length)return;
-  const present=this.tracks.filter(t=>t.present&&t.body);
+  const present=this.tracks.filter(t=>t.body&&this.featureForGame(t,at));
   for(const particle of this.energy){
    if(at<particle.availableAt)continue;
    let target=null,best=Infinity;
@@ -179,7 +205,7 @@ export class People{
  active(now){
   for(const t of this.tracks){
    const age=Math.max(0,now-t.at);
-   if(age<=RENDER_HOLD_MS){t.present=true;predictTrack(t,now)}else{t.present=false;t.observationFresh=false;t.renderBody=t.smooth;t.renderFeature=t.feature}
+   if(!t.associationAmbiguous&&age<=RENDER_HOLD_MS){t.present=true;predictTrack(t,now)}else{t.present=false;t.observationFresh=false;t.renderBody=t.smooth;t.renderFeature=t.feature}
   }
   return this.tracks.filter(t=>t.present&&now-t.at<=RENDER_HOLD_MS);
  }

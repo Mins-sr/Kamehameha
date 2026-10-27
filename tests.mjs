@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import './tracking-regressions.mjs';
 import {Game,features,MAX_CHARGE_MS} from './src/game.js';
 const base=()=>Array.from({length:33},()=>({x:.5,y:.5,z:0,visibility:1}));
 function pose(extended=false,side=1){let p=base();const coords={11:[.4,.35],12:[.6,.35],13:[.25,.51],14:[.64,.53],15:[.29,.56],16:[.34,.57],23:[.43,.64],24:[.57,.64]};for(const [i,[x,y]] of Object.entries(coords))p[i]={x,y,z:0,visibility:1};if(extended)for(const [i,x,y]of [[13,.61,.34],[14,.7,.36],[15,.82,.34],[16,.84,.38]])p[i]={x,y,z:i>14?-.4:-.18,visibility:1};if(side<0)p=p.map(v=>({...v,x:1-v.x}));return p}
@@ -100,7 +101,9 @@ const four=[0,.8,1.6,2.4].map(x=>translated(pose(),x));
  const people=new People();people.update(four,null,0);const fresh=translated(pose(),4);
  people.update([four[0],four[1],four[2],fresh],null,100);
  assert.equal(people.active(100).length,4);assert.equal(new Set(people.active(100).map(t=>t.slot)).size,4);
- assert.equal(people.active(100).find(t=>t.body.x>4).game.charge,0);
+ assert.equal(people.active(100).some(t=>t.body.x>4),false,'reserve the missing person\'s color during occlusion');
+ for(let at=200;at<=1500;at+=100)people.update([four[0],four[1],four[2],fresh],null,at);
+ assert.equal(people.active(1500).find(t=>t.body.x>4).game.charge,0,'a newcomer gets fresh state once the missing track expires');
 }
 // Execute all canvas effect paths using a numeric-checking context (not browser visual QA).
 globalThis.matchMedia=()=>({matches:false});globalThis.devicePixelRatio=1;
@@ -175,7 +178,11 @@ console.log('PASS: repeated observations do not charge and partial occlusion pre
  const source=readFileSync('src/app.js','utf8'),snippet=source.slice(source.indexOf('function demoPose('),source.indexOf('\nfunction tick('));
  const demo=Function('clamp',`const demoAt=0;${snippet};return demoPose`)((v,a=0,b=1)=>Math.max(a,Math.min(b,v)));
  const people=new People(),fires=new Set();
- for(let now=0;now<15000;now+=100){const poses=Array.from({length:4},(_,i)=>demo(now-i*450).map(v=>({...v,x:.17+i*.22+(v.x-.5)*.38,y:.26+(v.y-.24)*.78,z:(v.z||0)*.5})));people.update(poses,null,now);for(const t of people.tracks)if(t.game.step(now,100,t.feature)==='fire')fires.add(t.slot)}
+ for(let now=0;now<15000;now+=10){
+  if(now%100===0){const poses=Array.from({length:4},(_,i)=>demo(now-i*450).map(v=>({...v,x:.17+i*.22+(v.x-.5)*.38,y:.26+(v.y-.24)*.78,z:(v.z||0)*.5})));people.update(poses,null,now)}
+  people.active(now);
+  for(const t of people.tracks)if(t.game.step(now,10,people.featureForGame(t,now))==='fire')fires.add(t.slot);
+ }
  assert.equal(fires.size,4,'all four demo people must charge and fire');
  console.log('PASS: actual four-person demo reaches a shot for every color.');
 }

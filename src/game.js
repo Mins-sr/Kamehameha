@@ -64,10 +64,11 @@ export class Game{
  step(now,dt,f){
   const gestureAvailable=Boolean(f&&f.gestureReady!==false);
   const hasObservationId=Boolean(f&&('observationId' in f||'sampleAt' in f));
-  const newObservation=Boolean(f)&&(!hasObservationId||f.observationId!==this.lastObservationId);
+  const observationId=f?.observationId??f?.sampleAt;
+  const newObservation=Boolean(f)&&(!hasObservationId||observationId!==this.lastObservationId);
   const sampleAt=f?.sampleAt??now;
   const observationDt=newObservation?(this.lastSampleAt===null?dt:Math.max(0,Math.min(120,sampleAt-this.lastSampleAt))):0;
-  if(newObservation){this.lastObservationId=f.observationId??null;this.lastSampleAt=sampleAt}
+  if(newObservation){this.lastObservationId=observationId??null;this.lastSampleAt=sampleAt}
   if(this.phase==='blast'){if(now>=this.until){this.phase='cooldown';this.until=now+900;return 'end'}return null}
   if(this.phase==='cooldown'){if(now>=this.until)this.reset();return null}
   if(!f){
@@ -87,8 +88,9 @@ export class Game{
    return null;
   }
   this.lost=0;this.partialLost=0;this.last=f;this.previousAt=now;
+  // A render tick is not evidence for or against a pending push.
+  if(!newObservation)return null;
   if(this.phase==='idle'){
-   if(!newObservation)return null;
    this.hold=f.charge?this.hold+observationDt:0;
    if(this.hold>=280){this.phase='charging';this.mode=f.mode||this.reserveMode||'kame';this.anchor={...f.relative,depth:f.depth,extension:f.extension};this.chargeTime=Math.min(MAX_CHARGE_MS,200+this.reserve*MAX_CHARGE_MS);this.reserve=0;this.reserveMode=null;this.charge=this.chargeTime/MAX_CHARGE_MS;return 'charge'}return null;
   }
@@ -104,7 +106,7 @@ export class Game{
   const handsTogether=f.releaseClose??f.close;
   const releaseHeight=this.mode==='genki'?dy<.72:dy<.2;
   const pushing=this.charge>.18&&handsTogether&&releaseHeight&&(projectedPush||forwardPush);
-  if(pushing&&newObservation){
+  if(pushing){
    const sample=f.sampleAt??now;
    if(this.pushSince===null){this.pushSince=now;this.pushSample=sample}
    if(now-this.pushSince>=65&&sample!==this.pushSample){
@@ -117,7 +119,6 @@ export class Game{
     return 'fire';
    }
   }else{this.pushSince=null;this.pushSample=null}
-  if(!newObservation)return null;
   if(f.charge){this.chargeTime=Math.min(MAX_CHARGE_MS,this.chargeTime+observationDt);this.charge=this.chargeTime/MAX_CHARGE_MS;this.hold=0}
   else{this.hold+=observationDt;if(!(f.releaseClose??f.close)||this.hold>1100){this.chargeTime=Math.max(0,this.chargeTime-observationDt*(MAX_CHARGE_MS/650));this.charge=this.chargeTime/MAX_CHARGE_MS;if(this.charge===0){this.reset();return 'cancel'}}}
   return null;
