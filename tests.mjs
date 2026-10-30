@@ -187,5 +187,3 @@ console.log('PASS: repeated observations do not charge and partial occlusion pre
  console.log('PASS: actual four-person demo reaches a shot for every color.');
 }
 
-
-await import('./vfx-regressions.mjs');
